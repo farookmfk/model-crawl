@@ -1,0 +1,21 @@
+# Local settings (API keys / tokens) and runtime state: never commit
+config.json
+jobs.json
+jobs.tmp
+.env
+*.log
+
+# Downloaded models and datasets
+downloads/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.claude/

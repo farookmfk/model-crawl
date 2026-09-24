@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Model Crawl</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1b1f24; --muted: #5d6673; --line: #dde1e6;
+  --accent: #2f5bd3; --accent-ink: #ffffff; --ok: #1f7a4a; --warn: #9a6200; --err: #b3261e;
+  --chip: #eef1f5; --bar: #e4e8ee; --radius: 10px;
+  --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111418; --panel: #191d23; --text: #e6e9ed; --muted: #97a0ab; --line: #2b313a;
+    --accent: #7c9cff; --accent-ink: #0d1117; --ok: #5cc98d; --warn: #e0a84a; --err: #f28b82;
+    --chip: #232932; --bar: #2a3039;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, "Segoe UI", sans-serif; }
+header { display: flex; align-items: center; gap: 16px; padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { font-size: 17px; margin: 0; font-weight: 650; }
+.status { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+.pill { font-size: 12px; padding: 2px 9px; border-radius: 99px; background: var(--chip); color: var(--muted); white-space: nowrap; }
+.pill.on { color: var(--ok); }
+main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 64px; display: grid; gap: 18px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+input[type=text], input[type=password], input[type=number], input[type=datetime-local], select, textarea {
+  font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 11px; min-width: 0;
+}
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+#query { flex: 1 1 320px; font-size: 16px; padding: 10px 13px; }
+button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 8px 14px; border-radius: 8px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.link { border: 0; background: none; color: var(--accent); padding: 2px 4px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; padding: 8px 14px; }
+.seg button[aria-pressed=true] { background: var(--accent); color: var(--accent-ink); }
+.hint { color: var(--muted); font-size: 13px; margin-top: 8px; }
+.msg { padding: 10px 12px; border-radius: 8px; background: var(--chip); font-size: 14px; }
+.msg.err { color: var(--err); }
+.msg.warn { color: var(--warn); }
+.hidden { display: none !important; }
+.list { display: grid; gap: 6px; }
+.cand { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; background: var(--bg); text-align: left; width: 100%; }
+.cand:hover { border-color: var(--accent); }
+.cand .id { font-family: var(--mono); font-size: 14px; overflow-wrap: anywhere; }
+.cand .meta { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.badge { font-size: 11.5px; padding: 1px 7px; border-radius: 99px; background: var(--chip); color: var(--muted); white-space: nowrap; }
+.badge.ok { color: var(--ok); } .badge.warn { color: var(--warn); } .badge.err { color: var(--err); }
+.repo-title { font-family: var(--mono); font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+.repo-title a { color: inherit; text-decoration: none; } .repo-title a:hover { text-decoration: underline; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+@media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } header { flex-wrap: wrap; } }
+.opts { display: grid; gap: 4px; max-height: 360px; overflow: auto; padding-right: 4px; }
+.opt { display: flex; gap: 10px; align-items: center; padding: 7px 10px; border-radius: 7px; border: 1px solid transparent; cursor: pointer; }
+.opt:hover { background: var(--chip); }
+.opt.sel { border-color: var(--accent); background: var(--chip); }
+.opt .name { font-family: var(--mono); font-size: 13.5px; overflow-wrap: anywhere; }
+.opt .size { margin-left: auto; color: var(--muted); font-size: 13px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.opt.match .name::after { content: " ← requested"; color: var(--ok); font-family: system-ui, sans-serif; font-size: 12px; }
+.files { max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
+.files label { display: flex; gap: 8px; font-family: var(--mono); font-size: 12.5px; padding: 2px 4px; }
+.files label span:last-child { margin-left: auto; color: var(--muted); }
+.field { display: grid; gap: 4px; margin-bottom: 12px; }
+.field > span { font-size: 13px; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips button { font-family: var(--mono); font-size: 12.5px; padding: 4px 9px; }
+.job { border-top: 1px solid var(--line); padding: 12px 0; display: grid; gap: 6px; }
+.group-head + .job { border-top: 0; padding-top: 6px; }
+.grow { flex: 1 1 0; }
+.group + .group { margin-top: 18px; }
+.group-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.group-head h3 { font-size: 14px; margin: 0; font-weight: 600; }
+.count { color: var(--muted); font-weight: 400; }
+.job .actions { margin-left: auto; gap: 6px; }
+.job .actions button { padding: 5px 10px; font-size: 13.5px; }
+.bar { height: 7px; background: var(--bar); border-radius: 99px; overflow: hidden; }
+.bar > div { height: 100%; background: var(--accent); transition: width .5s; }
+.job.completed .bar > div { background: var(--ok); }
+.job.failed .bar > div, .job.cancelled .bar > div { background: var(--err); }
+.num { font-variant-numeric: tabular-nums; }
+dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--text); padding: 22px; width: min(560px, calc(100vw - 32px)); }
+dialog::backdrop { background: rgba(0,0,0,.45); }
+dialog input, dialog select { width: 100%; }
+.intent { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; font-size: 14px; }
+.intent dt { color: var(--muted); } .intent dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
+pre.log { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; color: var(--muted); margin: 0; max-height: 120px; overflow: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Model Crawl</h1>
+  <div class="status" id="status"></div>
+  <button id="openSettings">Settings</button>
+</header>
+
+<main>
+  <section class="card">
+    <div class="row">
+      <div class="seg" role="group" aria-label="Repository type">
+        <button data-type="model" aria-pressed="true">Model</button>
+        <button data-type="dataset" aria-pressed="false">Dataset</button>
+      </div>
+      <input id="query" type="text" placeholder="owner/name, a huggingface.co URL, or describe what you want" autocomplete="off">
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="btnCheck" class="primary">Verify &amp; open</button>
+      <button id="btnSearch">Search</button>
+      <button id="btnAsk">Ask AI</button>
+      <span class="hint" style="margin:0">Enter picks automatically: repo ids are verified, other text is searched (or sent to the AI if one is configured).</span>
+    </div>
+  </section>
+
+  <div id="notice" class="msg hidden"></div>
+
+  <section class="card hidden" id="intentCard">
+    <h2>AI interpretation</h2>
+    <dl class="intent" id="intent"></dl>
+  </section>
+
+  <section class="card hidden" id="resultsCard">
+    <h2 id="resultsTitle">Search results</h2>
+    <div class="list" id="results"></div>
+    <div class="hint" id="resultsHint"></div>
+  </section>
+
+  <section class="card hidden" id="repoCard"></section>
+
+  <section class="card" id="jobsCard">
+    <h2>Downloads</h2>
+    <div id="jobs"><div class="hint">No downloads yet.</div></div>
+  </section>
+</main>
+
+<dialog id="settings">
+  <form method="dialog" id="settingsForm">
+    <h2 style="margin-top:0;font-size:18px">Settings</h2>
+    <p class="hint" style="margin-top:0">Stored in <code>config.json</code> next to the app, on this machine only. Leave a key blank to keep the saved one.</p>
+    <label class="field"><span>Hugging Face token <em id="hf_token_state"></em></span><input type="password" name="hf_token" placeholder="hf_…" autocomplete="off"></label>
+    <label class="field"><span>Brave Search API key <em id="brave_api_key_state"></em></span><input type="password" name="brave_api_key" autocomplete="off"></label>
+    <label class="field"><span>Download folder</span><input type="text" name="download_dir"></label>
+    <label class="field"><span>Queued downloads to run at the same time</span><input type="number" name="max_concurrent" min="1" max="8" style="width:100%"></label>
+    <label class="field"><span>LLM for understanding requests</span>
+      <select name="llm_provider">
+        <option value="none">None</option>
+        <option value="anthropic">Anthropic (Claude)</option>
+        <option value="openai_compatible">OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, OpenRouter…)</option>
+      </select>
+    </label>
+    <div data-provider="anthropic">
+      <label class="field"><span>Anthropic API key <em id="anthropic_api_key_state"></em></span><input type="password" name="anthropic_api_key" autocomplete="off"></label>
+      <label class="field"><span>Model</span><input type="text" name="anthropic_model"></label>
+    </div>
+    <div data-provider="openai_compatible">
+      <label class="field"><span>Base URL</span><input type="text" name="openai_base_url"></label>
+      <label class="field"><span>Model name</span><input type="text" name="openai_model" placeholder="e.g. qwen2.5:14b"></label>
+      <label class="field"><span>API key (optional) <em id="openai_api_key_state"></em></span><input type="password" name="openai_api_key" autocomplete="off"></label>
+    </div>
+    <div class="row" style="justify-content:flex-end;margin-top:8px">
+      <button value="cancel" formnovalidate>Cancel</button>
+      <button value="save" class="primary" id="saveSettings">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtBytes = n => { if (!n) return "0 B"; const u = ["B","KB","MB","GB","TB"]; let i = Math.min(Math.floor(Math.log(n)/Math.log(1024)), 4); return (n/1024**i).toFixed(i ? 1 : 0) + " " + u[i]; };
+const fmtNum = n => n == null ? "" : n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"k" : String(n);
+const looksLikeRepo = s => /^(https?:\/\/)?(www\.)?(huggingface\.co|hf\.co)\//i.test(s) || /^(datasets\/)?[A-Za-z0-9][\w.-]*\/[\w.-]+$/.test(s);
+
+let cfg = {}, repoType = "model", repo = null, wantedQuant = "";
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data));
+  return data;
+}
+function notice(text, kind = "") {
+  const el = $("#notice");
+  el.className = "msg " + kind + (text ? "" : " hidden");
+  el.textContent = text || "";
+}
+function busy(btn, on) { btn.disabled = on; btn.dataset.label ??= btn.textContent; btn.textContent = on ? "Working…" : btn.dataset.label; }
+
+// ---------------------------------------------------------------- settings
+async function loadConfig() {
+  cfg = await api("/api/config");
+  const pills = [["HF token", cfg.hf_token_set], ["Brave search", cfg.brave_api_key_set], ["LLM", cfg.llm_ready]];
+  $("#status").innerHTML = pills.map(([n, on]) => `<span class="pill ${on ? "on" : ""}">${on ? "●" : "○"} ${n}</span>`).join("");
+  $("#btnAsk").disabled = !cfg.llm_ready;
+  $("#btnAsk").title = cfg.llm_ready ? "" : "Configure an LLM in Settings";
+}
+function showProvider() {
+  const p = $("[name=llm_provider]").value;
+  document.querySelectorAll("[data-provider]").forEach(el => el.classList.toggle("hidden", el.dataset.provider !== p));
+}
+$("#openSettings").onclick = () => {
+  const f = $("#settingsForm");
+  for (const el of f.elements) {
+    if (!el.name) continue;
+    if (el.type === "password") { el.value = ""; $("#" + el.name + "_state").textContent = cfg[el.name + "_set"] ? `(saved ${cfg[el.name]})` : "(not set)"; }
+    else el.value = cfg[el.name] ?? "";
+  }
+  showProvider();
+  $("#settings").showModal();
+};
+$("[name=llm_provider]").onchange = showProvider;
+$("#settings").addEventListener("close", async () => {
+  if ($("#settings").returnValue !== "save") return;
+  const values = {};
+  for (const el of $("#settingsForm").elements) if (el.name) values[el.name] = el.value;
+  try { await api("/api/config", { method: "POST", body: JSON.stringify({ values }) }); await loadConfig(); notice("Settings saved."); }
+  catch (e) { notice(e.message, "err"); }
+});
+
+// ---------------------------------------------------------------- query actions
+document.querySelectorAll(".seg button").forEach(b => b.onclick = () => {
+  repoType = b.dataset.type;
+  document.querySelectorAll(".seg button").forEach(x => x.setAttribute("aria-pressed", x === b));
+});
+$("#query").addEventListener("keydown", e => {
+  if (e.key !== "Enter") return;
+  const q = $("#query").value.trim();
+  if (!q) return;
+  if (looksLikeRepo(q)) $("#btnCheck").click();
+  else if (cfg.llm_ready) $("#btnAsk").click();
+  else $("#btnSearch").click();
+});
+
+$("#btnCheck").onclick = async () => {
+  const q = $("#query").value.trim(); if (!q) return;
+  wantedQuant = "";
+  $("#intentCard").classList.add("hidden");
+  if (!looksLikeRepo(q)) return $("#btnSearch").click();
+  await openRepo(q, repoType, null, $("#btnCheck"));
+};
+
+$("#btnSearch").onclick = async () => {
+  const q = $("#query").value.trim(); if (!q) return;
+  const btn = $("#btnSearch"); busy(btn, true); notice("");
+  $("#intentCard").classList.add("hidden");
+  try { renderResults(await api(`/api/search?q=${encodeURIComponent(q)}&repo_type=${repoType}`), "Search results"); }
+  catch (e) { notice(e.message, "err"); }
+  finally { busy(btn, false); }
+};
+
+$("#btnAsk").onclick = async () => {
+  const q = $("#query").value.trim(); if (!q) return;
+  const btn = $("#btnAsk"); busy(btn, true); notice("");
+  try {
+    const r = await api("/api/interpret", { method: "POST", body: JSON.stringify({ text: q }) });
+    const it = r.intent;
+    wantedQuant = it.quantization || "";
+    $("#intent").innerHTML = [["Type", it.repo_type], ["Repo", it.repo_id || "—"], ["Search", it.search_query], ["Quantization", it.quantization || "—"], ["Reading", it.explanation]]
+      .map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("");
+    $("#intentCard").classList.remove("hidden");
+    renderResults(r, "Candidates");
+    if (r.verified) await openRepo(r.verified.id, r.verified.repo_type);
+  } catch (e) { notice(e.message, "err"); }
+  finally { busy(btn, false); }
+};
+
+function renderResults(r, title) {
+  $("#resultsTitle").textContent = title;
+  $("#resultsCard").classList.remove("hidden");
+  const list = r.results || [];
+  $("#results").innerHTML = list.length ? list.map(c => `
+    <button class="cand" data-id="${esc(c.id)}" data-type="${c.repo_type}">
+      <span class="id">${esc(c.id)}</span>
+      <span class="meta">
+        ${c.repo_type !== repoType ? `<span class="badge warn">${c.repo_type}</span>` : ""}
+        ${c.verified ? `<span class="badge ok">✓ exists</span>` : ""}
+        ${c.gated ? `<span class="badge warn">gated</span>` : ""}
+        ${c.source.map(s => `<span class="badge">${s === "hf" ? "Hub search" : "Brave"}</span>`).join("")}
+        ${c.downloads != null ? `<span class="badge">↓ ${fmtNum(c.downloads)}</span>` : ""}
+        ${c.likes != null ? `<span class="badge">♥ ${fmtNum(c.likes)}</span>` : ""}
+      </span>
+    </button>`).join("") : `<div class="hint">No matching repositories found.</div>`;
+  const hints = [];
+  if (!r.brave_used) hints.push("Add a Brave Search key in Settings to also search the web for fuzzy names.");
+  if (r.brave_error) hints.push("Brave search failed: " + r.brave_error);
+  if (r.unverified_web_hits?.length) hints.push(`Web results that no longer exist on the Hub were dropped: ${r.unverified_web_hits.join(", ")}`);
+  $("#resultsHint").textContent = hints.join(" ");
+  $("#results").querySelectorAll(".cand").forEach(b => b.onclick = () => openRepo(b.dataset.id, b.dataset.type));
+}
+
+// ---------------------------------------------------------------- repo details
+async function openRepo(ref, type, revision = null, btn = null) {
+  if (btn) busy(btn, true);
+  notice("");
+  const card = $("#repoCard");
+  try {
+    const r = await api(`/api/resolve?repo=${encodeURIComponent(ref)}&repo_type=${type}` + (revision ? `&revision=${encodeURIComponent(revision)}` : ""));
+    if (!r.exists) {
+      card.classList.add("hidden");
+      notice(`${r.repo_type === "dataset" ? "Dataset" : "Model"} "${r.repo_id}" does not exist on Hugging Face (or is private and your token cannot see it).`, "err");
+      if (r.suggestions?.length) renderResults({ results: r.suggestions, brave_used: true }, "Did you mean");
+      return;
+    }
+    repo = r;
+    const d = await api(`/api/default-dest?repo_id=${encodeURIComponent(r.repo_id)}&repo_type=${r.repo_type}`);
+    renderRepo(d.dest);
+    card.classList.remove("hidden");
+    card.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (e) { notice(e.message, "err"); }
+  finally { if (btn) busy(btn, false); }
+}
+
+function quantMatches(label) {
+  if (!wantedQuant) return false;
+  const a = label.toUpperCase().replace(/^UD-/, ""), b = wantedQuant.toUpperCase().replace(/[\s-]/g, "_");
+  return a === b || a === b.replace(/_/g, "");
+}
+
+function renderRepo(dest) {
+  const r = repo, i = r.info;
+  const main = r.variants.filter(v => v.kind !== "extra");
+  const extras = r.variants.filter(v => v.kind === "extra");
+  const match = main.find(v => quantMatches(v.label));
+  const defaultChoice = match ? match.id : (main.length && main.every(v => v.kind === "gguf") ? main[0].id : "full");
+  const quantNote = wantedQuant && !match
+    ? `<div class="msg warn" style="margin-bottom:10px">"${esc(wantedQuant)}" was requested but isn't a file variant in this repo${r.alternatives.length ? " — see quantized repos below" : ""}.</div>` : "";
+
+  $("#repoCard").innerHTML = `
+    <div class="row" style="align-items:baseline">
+      <div class="repo-title"><a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(r.repo_id)}</a></div>
+      <span class="badge ok">✓ verified on Hub</span>
+      ${i.gated ? `<span class="badge warn" title="Accept the terms on huggingface.co first">gated</span>` : ""}
+      ${i.private ? `<span class="badge">private</span>` : ""}
+    </div>
+    <div class="row" style="margin:8px 0 16px;gap:6px">
+      ${[i.pipeline_tag, i.library, i.license && "license: " + i.license, i.quantized_from && "quantized from " + i.quantized_from,
+         i.downloads != null && "↓ " + fmtNum(i.downloads), i.likes != null && "♥ " + fmtNum(i.likes),
+         `${r.files.length} files · ${fmtBytes(r.total_size)}`, i.last_modified && "updated " + i.last_modified.slice(0, 10)]
+        .filter(Boolean).map(t => `<span class="badge">${esc(t)}</span>`).join("")}
+    </div>
+    ${i.gated ? `<div class="msg warn" style="margin-bottom:12px">This repo is gated. Downloads only work if the account behind your HF token has accepted its terms on <a href="${esc(i.url)}" target="_blank" rel="noopener">its page</a>.</div>` : ""}
+    <div class="grid2">
+      <div>
+        <h2>${main.some(v => v.kind === "gguf" || v.kind === "onnx") ? "Quantization" : "What to download"}</h2>
+        ${quantNote}
+        <div class="opts" id="opts">
+          ${main.map(v => optHtml(v.id, v.label, v.size, v.files.length, quantMatches(v.label))).join("")}
+          ${optHtml("full", "Entire repository", r.total_size, r.files.length)}
+          ${optHtml("custom", "Pick files / patterns…", null)}
+        </div>
+        ${extras.length ? `<h2 style="margin-top:14px">Extras</h2>` + extras.map(v => `
+          <label class="opt"><input type="checkbox" class="extra" value="${esc(v.id)}"><span class="name">${esc(v.label)}</span><span class="size">${fmtBytes(v.size)}</span></label>`).join("") : ""}
+        <div id="custom" class="hidden" style="margin-top:10px">
+          <div class="files">${r.files.map(f => `<label><input type="checkbox" class="cf" value="${esc(f.path)}"><span>${esc(f.path)}</span><span>${fmtBytes(f.size)}</span></label>`).join("")}</div>
+          <label class="field" style="margin-top:8px"><span>…and/or glob patterns (comma separated), e.g. <code>*.parquet, data/train-*</code></span><input type="text" id="patterns"></label>
+        </div>
+      </div>
+      <div>
+        ${r.branches.length > 1 ? `
+          <label class="field"><span>Branch / revision</span>
+            <select id="revision">${r.branches.map(b => `<option ${b === r.revision ? "selected" : ""}>${esc(b)}</option>`).join("")}</select>
+          </label>` : ""}
+        <label class="opt" style="padding-left:0"><input type="checkbox" id="meta" checked>
+          <span>Include config / tokenizer / README files (${r.metadata_files.length})</span></label>
+        <label class="field" style="margin-top:10px"><span>Save to</span><input type="text" id="dest" value="${esc(dest)}"></label>
+        <div class="hint" id="selSummary" style="margin:0 0 8px"></div>
+        <div class="row">
+          <button class="primary grow" data-when="now">Download now</button>
+          <button class="grow" data-when="queue">Add to queue</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <input type="datetime-local" id="when" class="grow" value="${defaultScheduleTime()}">
+          <button data-when="schedule">Schedule</button>
+        </div>
+        <div class="hint">"Download now" starts right away, alongside anything already running. Queued downloads run one after another (${cfg.max_concurrent || 1} at a time, set in Settings).</div>
+        ${r.alternatives.length ? `
+          <h2 style="margin-top:20px">Quantized versions ${i.quantized_from ? "of the same base model" : "of this model"}</h2>
+          <div class="chips">${r.alternatives.map(a => `<button data-alt="${esc(a.id)}" title="↓ ${fmtNum(a.downloads)}">${esc(a.id)} <span class="badge">${esc(a.format)}</span></button>`).join("")}</div>` : ""}
+        ${i.quantized_from ? `<div class="hint">Base model: <button class="link" data-alt="${esc(i.quantized_from)}">${esc(i.quantized_from)}</button></div>` : ""}
+      </div>
+    </div>`;
+
+  const card = $("#repoCard");
+  card.querySelectorAll("input[name=choice]").forEach(el => el.onchange = updateSelection);
+  card.querySelectorAll(".extra, .cf, #meta").forEach(el => el.onchange = updateSelection);
+  $("#patterns").oninput = updateSelection;
+  $("#revision")?.addEventListener("change", e => openRepo(r.repo_id, r.repo_type, e.target.value));
+  card.querySelectorAll("[data-alt]").forEach(b => b.onclick = () => openRepo(b.dataset.alt, "model"));
+  card.querySelectorAll("[data-when]").forEach(b => b.onclick = () => startDownload(b.dataset.when, b));
+  const pick = card.querySelector(`input[name=choice][value="${CSS.escape(defaultChoice)}"]`);
+  if (pick) pick.checked = true;
+  updateSelection();
+}
+
+function optHtml(id, label, size, count, match = false) {
+  return `<label class="opt ${match ? "match" : ""}"><input type="radio" name="choice" value="${esc(id)}">
+    <span class="name">${esc(label)}</span>
+    <span class="size">${size == null ? "" : fmtBytes(size) + (count > 1 ? ` · ${count} files` : "")}</span></label>`;
+}
+
+function selection() {
+  const r = repo, card = $("#repoCard");
+  const choice = card.querySelector("input[name=choice]:checked")?.value || "full";
+  if (choice === "full") return { files: [], patterns: [], size: r.total_size, count: r.files.length, choice };
+  const files = new Set();
+  let patterns = [];
+  if (choice === "custom") {
+    card.querySelectorAll(".cf:checked").forEach(el => files.add(el.value));
+    patterns = $("#patterns").value.split(",").map(s => s.trim()).filter(Boolean);
+  } else {
+    r.variants.find(v => v.id === choice).files.forEach(f => files.add(f));
+  }
+  card.querySelectorAll(".extra:checked").forEach(el => r.variants.find(v => v.id === el.value).files.forEach(f => files.add(f)));
+  if ($("#meta").checked) r.metadata_files.forEach(f => files.add(f));
+  const sizes = Object.fromEntries(r.files.map(f => [f.path, f.size]));
+  const globRe = p => new RegExp("^" + p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$");
+  patterns.forEach(p => { const re = globRe(p); r.files.forEach(f => re.test(f.path) && files.add(f.path)); });
+  const list = [...files];
+  return { files: list, patterns: [], size: list.reduce((a, f) => a + (sizes[f] || 0), 0), count: list.length, choice };
+}
+
+function updateSelection() {
+  const card = $("#repoCard");
+  const s = selection();
+  card.querySelectorAll(".opt").forEach(o => o.classList.toggle("sel", !!o.querySelector("input:checked")));
+  $("#custom").classList.toggle("hidden", s.choice !== "custom");
+  $("#meta").disabled = s.choice === "full";
+  const empty = s.choice !== "full" && s.count === 0;
+  card.querySelectorAll("[data-when]").forEach(b => b.disabled = empty);
+  $("#selSummary").textContent = `Selected: ${s.count} file${s.count === 1 ? "" : "s"} · ${fmtBytes(s.size)}`;
+}
+
+function defaultScheduleTime() {
+  // Tonight at 01:00, as a local "YYYY-MM-DDTHH:MM" string
+  const d = new Date(); d.setDate(d.getDate() + (d.getHours() >= 1 ? 1 : 0)); d.setHours(1, 0, 0, 0);
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+const fmtWhen = ts => new Date(ts * 1000).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+function fmtIn(secs) {
+  if (secs <= 0) return "any moment";
+  const d = Math.floor(secs / 86400), h = Math.floor(secs % 86400 / 3600), m = Math.ceil(secs % 3600 / 60);
+  return "in " + (d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`);
+}
+
+async function startDownload(when, btn) {
+  const s = selection();
+  let scheduled_at = null;
+  if (when === "schedule") {
+    const v = $("#when").value;
+    if (!v) return notice("Pick a date and time to schedule the download.", "err");
+    scheduled_at = new Date(v).getTime() / 1000;  // datetime-local is interpreted in this browser's time zone
+  }
+  btn.disabled = true;
+  try {
+    const job = await api("/api/download", { method: "POST", body: JSON.stringify({
+      repo_id: repo.repo_id, repo_type: repo.repo_type, revision: repo.revision,
+      files: s.files, patterns: s.patterns, dest: $("#dest").value.trim() || null, when, scheduled_at }) });
+    notice({ now: `Started downloading ${repo.repo_id}.`,
+             queue: `Added ${repo.repo_id} to the queue.`,
+             schedule: `Scheduled ${repo.repo_id} for ${fmtWhen(job.scheduled_at)}.` }[when]);
+    pollJobs();
+    $("#jobsCard").scrollIntoView({ behavior: "smooth" });
+  } catch (e) { notice(e.message, "err"); }
+  finally { btn.disabled = false; }
+}
+
+// ---------------------------------------------------------------- jobs
+const lastSeen = {};
+let pollTimer = null, reschedule = null;  // reschedule = { id, value } while its inline editor is open
+async function pollJobs() {
+  clearTimeout(pollTimer);
+  let data = { jobs: [] };
+  try { data = await api("/api/jobs"); } catch { /* server restarting */ }
+  const typing = document.activeElement?.closest?.("#jobs") && document.activeElement.tagName === "INPUT";
+  if (!typing) renderJobs(data);
+  const jobs = data.jobs;
+  if (jobs.some(j => j.status === "running")) pollTimer = setTimeout(pollJobs, 1000);
+  else if (jobs.some(j => ["queued", "scheduled"].includes(j.status))) pollTimer = setTimeout(pollJobs, 3000);
+}
+
+const GROUPS = [
+  ["running", "Running"],
+  ["queued", "Queued"],
+  ["scheduled", "Scheduled"],
+  ["finished", "Finished"],
+];
+
+function renderJobs({ jobs, now }) {
+  if (!jobs.length) { $("#jobs").innerHTML = `<div class="hint">No downloads yet.</div>`; return; }
+  const groupOf = j => ["completed", "failed", "cancelled"].includes(j.status) ? "finished" : j.status;
+  const sorted = {
+    running: j => j.started, queued: j => j.queue_position, scheduled: j => j.scheduled_at, finished: j => -(j.ended || 0),
+  };
+  $("#jobs").innerHTML = GROUPS.map(([key, title]) => {
+    const list = jobs.filter(j => groupOf(j) === key).sort((a, b) => sorted[key](a) - sorted[key](b));
+    if (!list.length) return "";
+    const extra = key === "finished" && list.some(j => j.status === "completed")
+      ? `<button class="link" data-act="clear-completed">Clear completed</button>` : "";
+    return `<div class="group"><div class="group-head"><h3>${title} <span class="count">${list.length}</span></h3>${extra}</div>
+      ${list.map(j => jobHtml(j, now)).join("")}</div>`;
+  }).join("");
+
+  $("#jobs").querySelectorAll("[data-act]").forEach(b => b.onclick = () => jobAction(b.dataset.act, b.dataset.id, b.dataset.dir));
+  const input = $("#jobs .resched-input");
+  if (input) input.oninput = () => (reschedule.value = input.value);
+}
+
+function jobHtml(j, now) {
+  const pct = j.total ? Math.round(100 * j.downloaded / j.total) : (j.status === "completed" ? 100 : 0);
+  const prev = lastSeen[j.id], t = Date.now();
+  let speed = "";
+  if (j.status === "running" && prev && t > prev.t) {
+    const bps = Math.max(0, (j.downloaded - prev.b) / ((t - prev.t) / 1000));
+    prev.bps = prev.bps ? prev.bps * 0.7 + bps * 0.3 : bps;
+    speed = ` · ${fmtBytes(prev.bps)}/s`;
+  }
+  lastSeen[j.id] = { t, b: j.downloaded, bps: j.status === "running" ? prev?.bps : 0 };
+  const cls = { completed: "ok", failed: "err", cancelled: "warn", scheduled: "", queued: "", running: "" }[j.status];
+  const btn = (act, label, extra = "") => `<button data-act="${act}" data-id="${j.id}" ${extra}>${label}</button>`;
+  const actions = {
+    running: [btn("cancel", "Cancel")],
+    queued: [btn("move", "↑", 'data-dir="up" title="Move up"'), btn("move", "↓", 'data-dir="down" title="Move down"'),
+             btn("start", "Start now"), btn("resched", "Schedule…"), btn("cancel", "Cancel")],
+    scheduled: [btn("start", "Start now"), btn("retry", "Queue now"), btn("resched", "Change time…"), btn("cancel", "Cancel")],
+    failed: [btn("retry", "Resume"), btn("resched", "Schedule…")],
+    cancelled: [btn("retry", "Resume"), btn("resched", "Schedule…")],
+    completed: [],
+  }[j.status];
+  if (["running", "completed", "failed", "cancelled"].includes(j.status)) actions.push(btn("open", "Open folder"));
+  if (!["running", "queued", "scheduled"].includes(j.status))
+    actions.push(`<button class="link" data-act="forget" data-id="${j.id}" title="Remove from list (files are kept)">✕</button>`);
+
+  const when = j.status === "scheduled"
+    ? `<span class="badge">starts ${esc(fmtWhen(j.scheduled_at))} · ${fmtIn(j.scheduled_at - now)}</span>`
+    : j.status === "queued" ? `<span class="badge">#${j.queue_position} in queue</span>` : "";
+  const editing = reschedule?.id === j.id ? `
+    <div class="row">
+      <input type="datetime-local" class="resched-input" value="${esc(reschedule.value)}">
+      ${btn("resched-save", "Save", 'class="primary"')} ${btn("resched-close", "Close")}
+    </div>` : "";
+
+  return `<div class="job ${j.status}">
+    <div class="row">
+      <span class="id" style="font-family:var(--mono)">${esc(j.repo_id)}</span>
+      ${j.revision !== "main" ? `<span class="badge">${esc(j.revision)}</span>` : ""}
+      <span class="badge ${cls}">${j.status}</span>${when}
+      <span class="row actions">${actions.join("")}</span>
+    </div>
+    ${editing}
+    <div class="bar"><div style="width:${pct}%"></div></div>
+    <div class="hint num" style="margin:0">${pct}% · ${fmtBytes(j.downloaded)} of ${fmtBytes(j.total)} · ${j.files_done}/${j.file_count} files${speed} · <code>${esc(j.dest)}</code></div>
+    ${j.errors.length ? `<pre class="log" style="color:var(--err)">${esc(j.errors.map(e => e.path + ": " + e.error).join("\n"))}</pre>` : ""}
+    ${j.status === "failed" && !j.errors.length && j.log.length ? `<pre class="log">${esc(j.log.join("\n"))}</pre>` : ""}
+  </div>`;
+}
+
+async function jobAction(act, id, dir) {
+  const post = (path, body) => api(path, { method: "POST", body: body && JSON.stringify(body) });
+  try {
+    if (act === "resched") { reschedule = { id, value: defaultScheduleTime() }; }
+    else if (act === "resched-close") { reschedule = null; }
+    else if (act === "resched-save") {
+      if (!reschedule.value) return notice("Pick a date and time.", "err");
+      await post(`/api/jobs/${id}/schedule`, { scheduled_at: new Date(reschedule.value).getTime() / 1000 });
+      reschedule = null;
+    }
+    else if (act === "clear-completed") await post("/api/jobs/clear-completed");
+    else if (act === "forget") await api(`/api/jobs/${id}`, { method: "DELETE" });
+    else if (act === "move") await post(`/api/jobs/${id}/move`, { direction: dir });
+    else await post(`/api/jobs/${id}/${act}`);
+  } catch (e) { notice(e.message, "err"); }
+  document.activeElement?.blur?.();
+  pollJobs();
+}
+
+loadConfig().catch(e => notice("Cannot reach the local server: " + e.message, "err"));
+pollJobs();
+</script>
+</body>
+</html>

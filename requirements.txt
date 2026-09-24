@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+huggingface_hub
+httpx
+anthropic
