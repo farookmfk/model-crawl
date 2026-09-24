@@ -54,6 +54,8 @@ button.link { border: 0; background: none; color: var(--accent); padding: 2px 4p
 .cand .id { font-family: var(--mono); font-size: 14px; overflow-wrap: anywhere; }
 .cand .meta { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .badge { font-size: 11.5px; padding: 1px 7px; border-radius: 99px; background: var(--chip); color: var(--muted); white-space: nowrap; }
+.badge.pick { color: var(--accent-ink); background: var(--accent); font-weight: 600; }
+.opt .badge { margin-left: 4px; }
 .badge.ok { color: var(--ok); } .badge.warn { color: var(--warn); } .badge.err { color: var(--err); }
 .repo-title { font-family: var(--mono); font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
 .repo-title a { color: inherit; text-decoration: none; } .repo-title a:hover { text-decoration: underline; }
@@ -148,6 +150,7 @@ pre.log { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; colo
     <label class="field"><span>Brave Search API key <em id="brave_api_key_state"></em></span><input type="password" name="brave_api_key" autocomplete="off"></label>
     <label class="field"><span>Download folder</span><input type="text" name="download_dir"></label>
     <label class="field"><span>Queued downloads to run at the same time</span><input type="number" name="max_concurrent" min="1" max="8" style="width:100%"></label>
+    <label class="field"><span>GPU / unified memory for models, in GB (0 = off). Marks each quant as fits / tight / too big and suggests one.</span><input type="number" name="memory_gb" min="0" step="1" style="width:100%"></label>
     <label class="field"><span>LLM for understanding requests</span>
       <select name="llm_provider">
         <option value="none">None</option>
@@ -164,6 +167,7 @@ pre.log { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; colo
       <label class="field"><span>Model name</span><input type="text" name="openai_model" placeholder="e.g. qwen2.5:14b"></label>
       <label class="field"><span>API key (optional) <em id="openai_api_key_state"></em></span><input type="password" name="openai_api_key" autocomplete="off"></label>
     </div>
+    <label class="field"><span>LLM timeout in seconds (then "Ask AI" falls back to plain search)</span><input type="number" name="llm_timeout" min="3" max="300" style="width:100%"></label>
     <div class="row" style="justify-content:flex-end;margin-top:8px">
       <button value="cancel" formnovalidate>Cancel</button>
       <button value="save" class="primary" id="saveSettings">Save</button>
@@ -179,6 +183,17 @@ const fmtNum = n => n == null ? "" : n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e
 const looksLikeRepo = s => /^(https?:\/\/)?(www\.)?(huggingface\.co|hf\.co)\//i.test(s) || /^(datasets\/)?[A-Za-z0-9][\w.-]*\/[\w.-]+$/.test(s);
 
 let cfg = {}, repoType = "model", repo = null, wantedQuant = "";
+let wantedMemory = 0, aiPick = null;  // from the last "Ask AI" answer
+
+// Memory budget: from the request ("for my 3090") first, then Settings. 0 = no suggestion.
+const budgetGB = () => wantedMemory || Number(cfg.memory_gb) || 0;
+function fitOf(bytes) {
+  const b = budgetGB();
+  if (!b || !bytes) return null;
+  const gb = bytes / 1024 ** 3;
+  // Leave ~20% for context (KV cache) and runtime overhead.
+  return gb <= b * 0.8 ? "fits" : gb <= b ? "tight" : "too big";
+}
 
 async function api(path, opts = {}) {
   const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
@@ -240,7 +255,7 @@ $("#query").addEventListener("keydown", e => {
 
 $("#btnCheck").onclick = async () => {
   const q = $("#query").value.trim(); if (!q) return;
-  wantedQuant = "";
+  wantedQuant = ""; wantedMemory = 0; aiPick = null;
   $("#intentCard").classList.add("hidden");
   if (!looksLikeRepo(q)) return $("#btnSearch").click();
   await openRepo(q, repoType, null, $("#btnCheck"));
@@ -249,6 +264,7 @@ $("#btnCheck").onclick = async () => {
 $("#btnSearch").onclick = async () => {
   const q = $("#query").value.trim(); if (!q) return;
   const btn = $("#btnSearch"); busy(btn, true); notice("");
+  wantedQuant = ""; wantedMemory = 0; aiPick = null;
   $("#intentCard").classList.add("hidden");
   try { renderResults(await api(`/api/search?q=${encodeURIComponent(q)}&repo_type=${repoType}`), "Search results"); }
   catch (e) { notice(e.message, "err"); }
@@ -259,14 +275,27 @@ $("#btnAsk").onclick = async () => {
   const q = $("#query").value.trim(); if (!q) return;
   const btn = $("#btnAsk"); busy(btn, true); notice("");
   try {
-    const r = await api("/api/interpret", { method: "POST", body: JSON.stringify({ text: q }) });
+    const r = await api("/api/interpret", { method: "POST", body: JSON.stringify({ text: q, repo_type: repoType }) });
+    if (!r.intent) {
+      // LLM unreachable or returned junk: the server already fell back to a plain search.
+      wantedQuant = ""; wantedMemory = 0; aiPick = null;
+      $("#intentCard").classList.add("hidden");
+      notice(`AI unavailable (${r.llm_error}). Showing plain search results instead.`, "warn");
+      renderResults(r, "Search results");
+      return;
+    }
     const it = r.intent;
     wantedQuant = it.quantization || "";
-    $("#intent").innerHTML = [["Type", it.repo_type], ["Repo", it.repo_id || "—"], ["Search", it.search_query], ["Quantization", it.quantization || "—"], ["Reading", it.explanation]]
-      .map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("");
+    wantedMemory = Number(it.memory_gb) || 0;
+    aiPick = r.pick;
+    $("#intent").innerHTML = [
+      ["Type", it.repo_type], ["Search", it.search_query], ["Quantization", it.quantization || "—"],
+      ["Memory", wantedMemory ? `${wantedMemory} GB` : "—"], ["Reading", it.explanation],
+      ["AI pick", r.pick ? `${r.pick.repo_id} — ${r.pick.reason}` : (r.pick_error ? `none (${r.pick_error})` : "none")],
+    ].map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("");
     $("#intentCard").classList.remove("hidden");
     renderResults(r, "Candidates");
-    if (r.verified) await openRepo(r.verified.id, r.verified.repo_type);
+    if (r.pick) await openRepo(r.pick.repo_id, r.pick.repo_type);
   } catch (e) { notice(e.message, "err"); }
   finally { busy(btn, false); }
 };
@@ -280,9 +309,10 @@ function renderResults(r, title) {
       <span class="id">${esc(c.id)}</span>
       <span class="meta">
         ${c.repo_type !== repoType ? `<span class="badge warn">${c.repo_type}</span>` : ""}
+        ${aiPick && aiPick.repo_id.toLowerCase() === c.id.toLowerCase() ? `<span class="badge pick">★ AI pick</span>` : ""}
         ${c.verified ? `<span class="badge ok">✓ exists</span>` : ""}
         ${c.gated ? `<span class="badge warn">gated</span>` : ""}
-        ${c.source.map(s => `<span class="badge">${s === "hf" ? "Hub search" : "Brave"}</span>`).join("")}
+        ${c.source.map(s => `<span class="badge">${{ hf: "Hub search", brave: "Brave", llm: "AI" }[s] || s}</span>`).join("")}
         ${c.downloads != null ? `<span class="badge">↓ ${fmtNum(c.downloads)}</span>` : ""}
         ${c.likes != null ? `<span class="badge">♥ ${fmtNum(c.likes)}</span>` : ""}
       </span>
@@ -328,9 +358,21 @@ function renderRepo(dest) {
   const main = r.variants.filter(v => v.kind !== "extra");
   const extras = r.variants.filter(v => v.kind === "extra");
   const match = main.find(v => quantMatches(v.label));
-  const defaultChoice = match ? match.id : (main.length && main.every(v => v.kind === "gguf") ? main[0].id : "full");
+  const budget = budgetGB();
+  const quants = main.filter(v => v.kind === "gguf" || v.kind === "onnx");
+  // Without an explicit quant request, suggest the largest quant that fits the memory budget.
+  const bestFit = budget && quants.length
+    ? [...quants].sort((a, b) => b.size - a.size).find(v => fitOf(v.size) === "fits") : null;
+  const defaultChoice = match ? match.id
+    : bestFit ? bestFit.id
+    : (main.length && main.every(v => v.kind === "gguf") ? main[0].id : "full");
   const quantNote = wantedQuant && !match
     ? `<div class="msg warn" style="margin-bottom:10px">"${esc(wantedQuant)}" was requested but isn't a file variant in this repo${r.alternatives.length ? " — see quantized repos below" : ""}.</div>` : "";
+  const memoryNote = !budget ? "" : `<div class="hint" style="margin:0 0 8px">
+      Memory budget <b>${budget} GB</b> (${wantedMemory ? "from your request" : "from Settings"}):
+      <i>fits</i> leaves ~20% for context, <i>tight</i> may only work with a short context.
+      ${!match && quants.length && !bestFit ? " <b>No quant fits comfortably</b>, so the smallest is listed first." : ""}
+      ${bestFit && !match ? ` Suggested: <b>${esc(bestFit.label)}</b>.` : ""}</div>`;
 
   $("#repoCard").innerHTML = `
     <div class="row" style="align-items:baseline">
@@ -349,9 +391,9 @@ function renderRepo(dest) {
     <div class="grid2">
       <div>
         <h2>${main.some(v => v.kind === "gguf" || v.kind === "onnx") ? "Quantization" : "What to download"}</h2>
-        ${quantNote}
+        ${quantNote}${r.repo_type === "model" ? memoryNote : ""}
         <div class="opts" id="opts">
-          ${main.map(v => optHtml(v.id, v.label, v.size, v.files.length, quantMatches(v.label))).join("")}
+          ${main.map(v => optHtml(v.id, v.label, v.size, v.files.length, quantMatches(v.label), r.repo_type === "model" && fitOf(v.size))).join("")}
           ${optHtml("full", "Entire repository", r.total_size, r.files.length)}
           ${optHtml("custom", "Pick files / patterns…", null)}
         </div>
@@ -399,9 +441,10 @@ function renderRepo(dest) {
   updateSelection();
 }
 
-function optHtml(id, label, size, count, match = false) {
+function optHtml(id, label, size, count, match = false, fit = null) {
+  const fitBadge = fit ? `<span class="badge ${{ fits: "ok", tight: "warn", "too big": "err" }[fit]}">${fit}</span>` : "";
   return `<label class="opt ${match ? "match" : ""}"><input type="radio" name="choice" value="${esc(id)}">
-    <span class="name">${esc(label)}</span>
+    <span class="name">${esc(label)}</span>${fitBadge}
     <span class="size">${size == null ? "" : fmtBytes(size) + (count > 1 ? ` · ${count} files` : "")}</span></label>`;
 }
 

@@ -22,9 +22,13 @@ It runs as a local Python server with a browser UI on **Windows, Linux and macOS
   - Optional extras such as `mmproj` vision projectors can be added.
 - **Find quantized versions**: for any model, lists other repos quantized from the same base model
   (GGUF, AWQ, GPTQ, MLX, ...).
-- **Ask AI** (optional): an LLM turns free text into a repo, a search query and a quantization, then
-  preselects the matching quant. Works with Anthropic Claude or any OpenAI-compatible endpoint (Ollama,
-  LM Studio, vLLM, OpenRouter, ...).
+- **Ask AI** (optional): an LLM turns free text such as *"llama 3.1 8b instruct gguf for my rtx 3060"*
+  into a search, a quantization and a memory budget. It then picks the best repo from the verified results
+  (preferring the exact model, the official org or a well-known quantizer), opens it and preselects the
+  quant. If the LLM is down or too slow, you get plain search results instead of an error. Works with
+  Anthropic Claude or any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, OpenRouter, ...).
+- **Fits your hardware**: set your GPU/unified memory once, or mention it in the request. Each quant is
+  marked *fits*, *tight* or *too big*, and the largest one that fits is preselected.
 - **Download manager**:
   - Downloads run in a background worker with live progress and speed, and can be cancelled or resumed.
   - **Download now**, **Add to queue** (reorderable, with a configurable number of parallel downloads) or
@@ -78,6 +82,8 @@ public repos.
 | LLM provider | **Anthropic** (API key and model, default `claude-opus-5`) or **OpenAI-compatible** (base URL, model, optional key) |
 | Download folder | defaults to `./downloads/<models\|datasets>/<owner>__<name>` |
 | Queued downloads at the same time | how many queued jobs run in parallel (default 1) |
+| GPU / unified memory (GB) | memory budget for the *fits / tight / too big* labels (0 = off). *Fits* means the files take ≤80% of it, leaving room for context. |
+| LLM timeout | seconds before "Ask AI" gives up and shows plain search results (default 20) |
 
 Settings are stored in `config.json` next to the app. **That file holds your keys and is git-ignored.
 Don't commit it.**
@@ -91,6 +97,21 @@ Environment variables are used when a setting is empty:
 | `MODEL_CRAWL_NO_BROWSER=1` | don't open a browser on start (headless servers) |
 | `MODEL_CRAWL_HOST` | bind address (default `127.0.0.1`) |
 | `MODEL_CRAWL_ALLOWED_HOSTS` | extra host names allowed to reach the UI, comma separated |
+
+### Choosing an LLM
+
+The LLM's job is small: extract a few fields as JSON, then choose one repo from a short list. The app
+checks every repo name on the Hub, so a model that invents names can't send you to a repo that doesn't
+exist. A small local instruct model is enough. In a 16-request test (quants, AWQ, MLX, datasets,
+hardware hints):
+
+| Model | Every field right | Notes |
+|---|---|---|
+| Gemma 4 E4B-it | 16/16 | recommended; about 3 s per request on a GB10 with NVFP4 weights |
+| Gemma 4 E2B-it | 10/16 | invents quant names (`Q6_K_M`) and writes wordier search queries |
+
+Use the instruction-tuned (`-it` / `-Instruct`) build, not the base model. On vLLM, a small
+`--max-model-len` (4-8k) is plenty; the prompt is about 500 tokens.
 
 ### Security notes
 

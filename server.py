@@ -45,6 +45,8 @@ DEFAULTS = {
     "openai_model": "",
     "download_dir": str(APP_DIR / "downloads"),
     "max_concurrent": 1,  # queued downloads that may run at the same time
+    "llm_timeout": 20,  # seconds before "Ask AI" gives up and falls back to plain search
+    "memory_gb": 0,  # GPU / unified memory for suggesting a quant that fits; 0 = off
 }
 ENV_FALLBACKS = {
     "hf_token": "HF_TOKEN",
@@ -143,6 +145,10 @@ def update_config(body: ConfigUpdate):
             continue  # blank secret field means "keep the saved one"
         if key == "max_concurrent":
             value = min(max(int(value or 1), 1), 8)
+        elif key == "llm_timeout":
+            value = min(max(float(value or 20), 3), 300)
+        elif key == "memory_gb":
+            value = max(float(value or 0), 0)
         cfg[key] = value
     for key in body.clear:
         if key in SECRET_FIELDS:
@@ -421,6 +427,11 @@ def search(q: str, repo_type: str = "model"):
 
 
 # ---------------------------------------------------------------- LLM request interpretation
+#
+# "Ask AI" makes up to two small LLM calls:
+#   1. intent: turn free text into repo type / repo id / search query / quant / memory budget
+#   2. pick:   choose the best repo from the verified search results
+# If the LLM is unreachable or misbehaves, the request falls back to a plain search.
 
 INTENT_SCHEMA = {
     "type": "object",
@@ -429,9 +440,10 @@ INTENT_SCHEMA = {
         "repo_id": {"type": "string", "description": "Exact 'owner/name' if you are confident, else empty"},
         "search_query": {"type": "string", "description": "Short query to find the repo on the Hub, e.g. 'Qwen2.5-7B-Instruct GGUF'"},
         "quantization": {"type": "string", "description": "Requested quant like Q4_K_M, Q8_0, IQ4_XS, BF16, AWQ, GPTQ, MLX-4bit; empty if none"},
-        "explanation": {"type": "string", "description": "One or two sentences on how you read the request"},
+        "memory_gb": {"type": "number", "description": "Memory the model must fit in, in GB, if the user mentions hardware or a size limit; else 0"},
+        "explanation": {"type": "string", "description": "One short sentence on how you read the request"},
     },
-    "required": ["repo_type", "repo_id", "search_query", "quantization", "explanation"],
+    "required": ["repo_type", "repo_id", "search_query", "quantization", "memory_gb", "explanation"],
     "additionalProperties": False,
 }
 
@@ -441,77 +453,161 @@ Map loose wording to concrete quant names: "4-bit"/"q4" for GGUF -> Q4_K_M, "8-b
 If they want a quantized build (GGUF/AWQ/GPTQ/MLX) of a base model, the search query should target that format,
 e.g. "Llama-3.1-8B-Instruct GGUF". Keep the specific quant (Q5_K_M etc.) out of search_query: one GGUF repo
 usually holds every quant, and the quant goes in the quantization field. Only fill repo_id when you are confident it exists; otherwise leave it empty.
+If the user mentions hardware or a size limit, set memory_gb to the usable memory: GPU VRAM for a graphics card
+(RTX 3060 -> 12, RTX 3090/4090 -> 24, RTX 5090 -> 32), unified memory for a Mac (e.g. "16GB MacBook" -> 16),
+or the stated limit ("must fit in 8 GB" -> 8). Otherwise memory_gb is 0.
 Respond with JSON only, matching this schema: """ + json.dumps(INTENT_SCHEMA)
 
+PICK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "repo_id": {"type": "string", "description": "The chosen candidate, copied exactly from the list"},
+        "reason": {"type": "string", "description": "One short sentence explaining the choice"},
+    },
+    "required": ["repo_id", "reason"],
+    "additionalProperties": False,
+}
 
-def call_llm(cfg, user_text):
-    if cfg["llm_provider"] == "anthropic":
-        import anthropic
+PICK_SYSTEM = """You choose the single best Hugging Face repository for a user's request from a list of candidates.
+Every candidate exists. Prefer, in order:
+1. The exact model/dataset, version and size the user asked for (not a different size, version or a fine-tune).
+2. The requested format: if they want a GGUF/AWQ/GPTQ/MLX quant, pick a repo in that format.
+3. The official organisation's repo, or a well-known quantizer (bartowski, unsloth, lmstudio-community,
+   QuantFactory, mradermacher, TheBloke, mlx-community), over personal re-uploads.
+4. Avoid merges, "abliterated"/uncensored or other derived variants unless the user asked for them.
+5. Higher downloads as a tie-breaker.
+Respond with JSON only, matching this schema: """ + json.dumps(PICK_SCHEMA)
 
-        client = anthropic.Anthropic(api_key=cfg["anthropic_api_key"])
-        model = cfg["anthropic_model"]
-        extra = {}
-        if model in ("claude-opus-5", "claude-fable-5-1"):
-            # Server-side fallback: re-run on another model if the request is declined.
-            extra = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
-        resp = client.beta.messages.create(
-            model=model,
-            max_tokens=4000,
-            system=INTENT_SYSTEM,
-            messages=[{"role": "user", "content": user_text}],
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": INTENT_SCHEMA}},
-            **extra,
-        )
-        if resp.stop_reason == "refusal":
-            raise HTTPException(422, "The model declined this request.")
-        text = next((b.text for b in resp.content if b.type == "text"), "")
-    elif cfg["llm_provider"] == "openai_compatible":
-        headers = {"Authorization": f"Bearer {cfg['openai_api_key']}"} if cfg["openai_api_key"] else {}
-        r = httpx.post(
-            cfg["openai_base_url"].rstrip("/") + "/chat/completions",
-            headers=headers,
-            json={"model": cfg["openai_model"], "temperature": 0,
-                  "messages": [{"role": "system", "content": INTENT_SYSTEM}, {"role": "user", "content": user_text}]},
-            timeout=120,
-        )
-        r.raise_for_status()
-        text = r.json()["choices"][0]["message"]["content"]
-    else:
-        raise HTTPException(400, "No LLM configured. Open Settings to add one.")
+
+class LLMError(Exception):
+    pass
+
+
+def call_llm(cfg, system, user_text, schema, max_tokens=600):
+    """One LLM call that returns a JSON object. Raises LLMError on any failure."""
+    timeout = float(cfg.get("llm_timeout") or 20)
+    try:
+        if cfg["llm_provider"] == "anthropic":
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=cfg["anthropic_api_key"], timeout=timeout, max_retries=1)
+            model = cfg["anthropic_model"]
+            extra = {}
+            if model in ("claude-opus-5", "claude-fable-5-1"):
+                # Server-side fallback: re-run on another model if the request is declined.
+                extra = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+            resp = client.beta.messages.create(
+                model=model,
+                max_tokens=4000,
+                system=system,
+                messages=[{"role": "user", "content": user_text}],
+                output_config={"effort": "low", "format": {"type": "json_schema", "schema": schema}},
+                **extra,
+            )
+            if resp.stop_reason == "refusal":
+                raise LLMError("the model declined this request")
+            text = next((b.text for b in resp.content if b.type == "text"), "")
+        elif cfg["llm_provider"] == "openai_compatible":
+            headers = {"Authorization": f"Bearer {cfg['openai_api_key']}"} if cfg["openai_api_key"] else {}
+            r = httpx.post(
+                cfg["openai_base_url"].rstrip("/") + "/chat/completions",
+                headers=headers,
+                json={"model": cfg["openai_model"], "temperature": 0, "max_tokens": max_tokens,
+                      "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_text}]},
+                timeout=timeout,
+            )
+            r.raise_for_status()
+            text = r.json()["choices"][0]["message"]["content"] or ""
+        else:
+            raise LLMError("no LLM configured")
+    except LLMError:
+        raise
+    except httpx.TimeoutException:
+        raise LLMError(f"no answer within {timeout:g}s")
+    except Exception as exc:
+        raise LLMError(f"{type(exc).__name__}: {exc}")
 
     m = re.search(r"\{.*\}", text, re.S)  # local models sometimes wrap JSON in prose / code fences
-    if not m:
-        raise HTTPException(502, f"LLM did not return JSON: {text[:300]}")
-    intent = json.loads(m.group(0))
-    return {k: intent.get(k) or ("model" if k == "repo_type" else "") for k in INTENT_SCHEMA["properties"]}
+    try:
+        data = json.loads(m.group(0)) if m else None
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        raise LLMError(f"reply was not JSON: {text[:200]}")
+    return data
+
+
+def interpret_intent(cfg, text):
+    raw = call_llm(cfg, INTENT_SYSTEM, text, INTENT_SCHEMA)
+    intent = {k: raw.get(k) or "" for k in INTENT_SCHEMA["properties"]}
+    intent["repo_type"] = intent["repo_type"] if intent["repo_type"] in ("model", "dataset") else "model"
+    try:
+        intent["memory_gb"] = max(0.0, float(raw.get("memory_gb") or 0))
+    except (TypeError, ValueError):
+        intent["memory_gb"] = 0.0
+    return intent
+
+
+def pick_candidate(cfg, text, intent, candidates):
+    """Ask the LLM to choose among verified candidates. Returns {"repo_id", "repo_type", "reason"} or None."""
+    listing = "\n".join(
+        f"- {c['id']} ({c['repo_type']}, {c.get('downloads') or 0} downloads, {c.get('likes') or 0} likes)"
+        for c in candidates
+    )
+    wanted = f"quantization: {intent['quantization']}\n" if intent["quantization"] else ""
+    prompt = f"User request: {text}\n{wanted}\nCandidates:\n{listing}"
+    raw = call_llm(cfg, PICK_SYSTEM, prompt, PICK_SCHEMA, max_tokens=300)
+    choice = str(raw.get("repo_id") or "").strip().lower()
+    for c in candidates:
+        if c["id"].lower() == choice:
+            return {"repo_id": c["id"], "repo_type": c["repo_type"], "reason": raw.get("reason") or ""}
+    return None  # the model named something that isn't in the list: ignore it
 
 
 class InterpretBody(BaseModel):
     text: str
+    repo_type: str = "model"  # used only when falling back to plain search
 
 
 @app.post("/api/interpret")
 def interpret(body: InterpretBody):
     cfg = load_config()
+    t0 = time.time()
     try:
-        intent = call_llm(cfg, body.text)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(502, f"LLM call failed: {type(exc).__name__}: {exc}")
+        intent = interpret_intent(cfg, body.text)
+    except LLMError as exc:
+        found = combined_search(body.text, body.repo_type)
+        return {"intent": None, "llm_error": str(exc), "pick": None, "verified": None, **found}
 
     verified = None
     if intent["repo_id"] and looks_like_repo_id(intent["repo_id"]):
         try:
             rtype, rid = parse_repo_ref(intent["repo_id"], intent["repo_type"])
             info = hf_api().repo_info(rid, repo_type=rtype)
-            verified = {"id": info.id, "repo_type": rtype}
-        except GatedRepoError:
-            verified = {"id": intent["repo_id"], "repo_type": intent["repo_type"]}
+            verified = {"id": info.id, "repo_type": rtype,
+                        "downloads": getattr(info, "downloads", None), "likes": getattr(info, "likes", None)}
         except Exception:
             verified = None
     found = combined_search(intent["search_query"] or intent["repo_id"] or body.text, intent["repo_type"])
-    return {"intent": intent, "verified": verified, **found}
+
+    candidates = [c for c in found["results"] if c.get("verified")][:12]
+    if verified and not any(c["id"].lower() == verified["id"].lower() for c in candidates):
+        candidates.insert(0, {**verified, "source": ["llm"], "verified": True})
+        found["results"].insert(0, candidates[0])
+
+    pick, pick_error = None, None
+    if len(candidates) == 1:
+        pick = {"repo_id": candidates[0]["id"], "repo_type": candidates[0]["repo_type"], "reason": "Only match found."}
+    elif candidates:
+        try:
+            pick = pick_candidate(cfg, body.text, intent, candidates)
+        except LLMError as exc:
+            pick_error = str(exc)
+    if not pick and verified:
+        pick = {"repo_id": verified["id"], "repo_type": verified["repo_type"], "reason": "Repo named by the AI."}
+
+    return {"intent": intent, "verified": verified, "pick": pick, "pick_error": pick_error,
+            "seconds": round(time.time() - t0, 1), **found}
 
 
 # ---------------------------------------------------------------- downloads: queue, scheduler, workers
